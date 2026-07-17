@@ -190,13 +190,28 @@ def shrink_if_huge(img: Image.Image, max_edge: int = MAX_INPUT_LONG_EDGE) -> Ima
 
 @st.cache_data(show_spinner=False, max_entries=20)
 def remove_background_cached(image_bytes: bytes, model_name: str,
-                              _v: int = 1) -> bytes:
-    """Run rembg on the input bytes and return RGBA PNG bytes."""
+                              precise_edges: bool = True,
+                              _v: int = 2) -> bytes:
+    """Run rembg on the input bytes and return RGBA PNG bytes.
+
+    Default remove() draws a hard binary edge, which can cut into the
+    subject on hair, fur, or soft-contrast boundaries. Alpha matting
+    estimates a gradient of transparency at the edge instead, so fine
+    detail is preserved rather than clipped.
+    """
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img)
     img = shrink_if_huge(img)
     session = get_session(model_name)
-    cleaned = remove(img, session=session)
+    cleaned = remove(
+        img,
+        session=session,
+        alpha_matting=precise_edges,
+        alpha_matting_foreground_threshold=240,
+        alpha_matting_background_threshold=10,
+        alpha_matting_erode_size=10,
+        post_process_mask=True,
+    )
     buf = io.BytesIO()
     cleaned.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
@@ -241,6 +256,15 @@ with st.sidebar:
 
     model_label = st.selectbox("AI model", list(AI_MODELS.keys()), index=0)
     model_name = AI_MODELS[model_label]
+
+    precise_edges = st.checkbox(
+        "🎯 Precise edges (recommended)",
+        value=True,
+        help="Smooths the cut so fine details like hair, fur, or soft "
+             "edges aren't clipped into the subject. Adds a few seconds "
+             "to processing. Turn off only if you need the fastest result "
+             "on a simple, solid-edge image.",
+    )
 
     bg_label = st.selectbox("Output background", list(BG_PRESETS.keys()), index=0)
     bg_choice = BG_PRESETS[bg_label]
@@ -322,7 +346,8 @@ if go or st.session_state.get("last_rgba_bytes"):
     if go:
         try:
             with st.spinner("Removing background… (5-15 seconds)"):
-                rgba_bytes = remove_background_cached(image_bytes, model_name)
+                rgba_bytes = remove_background_cached(image_bytes, model_name,
+                                                       precise_edges)
             st.session_state["last_rgba_bytes"] = rgba_bytes
             st.session_state["last_image_bytes"] = image_bytes
         except Exception as e:
