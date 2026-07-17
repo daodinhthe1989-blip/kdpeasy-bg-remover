@@ -3,7 +3,7 @@ import hashlib
 from typing import Tuple
 
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter
 from rembg import remove, new_session
 
 # ═══════════════════════════════════════════════════════════════════
@@ -188,30 +188,34 @@ def shrink_if_huge(img: Image.Image, max_edge: int = MAX_INPUT_LONG_EDGE) -> Ima
     return img.resize((new_w, new_h), Image.LANCZOS)
 
 
+def recover_clipped_edges(rgba_img: Image.Image, passes: int) -> Image.Image:
+    """Dilate the alpha channel outward by ~1px per pass.
+
+    rembg's mask is a hard cut, which can clip into the subject on hair,
+    fur, or soft-contrast edges. Expanding the kept area by a couple of
+    pixels reclaims that detail. Pure PIL — no extra dependency, unlike
+    rembg's alpha_matting option (which needs pymatting/numba and failed
+    to install on Streamlit Cloud).
+    """
+    if passes <= 0:
+        return rgba_img
+    r, g, b, a = rgba_img.split()
+    for _ in range(passes):
+        a = a.filter(ImageFilter.MaxFilter(3))
+    return Image.merge("RGBA", (r, g, b, a))
+
+
 @st.cache_data(show_spinner=False, max_entries=20)
 def remove_background_cached(image_bytes: bytes, model_name: str,
                               precise_edges: bool = True,
-                              _v: int = 2) -> bytes:
-    """Run rembg on the input bytes and return RGBA PNG bytes.
-
-    Default remove() draws a hard binary edge, which can cut into the
-    subject on hair, fur, or soft-contrast boundaries. Alpha matting
-    estimates a gradient of transparency at the edge instead, so fine
-    detail is preserved rather than clipped.
-    """
+                              _v: int = 3) -> bytes:
+    """Run rembg on the input bytes and return RGBA PNG bytes."""
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img)
     img = shrink_if_huge(img)
     session = get_session(model_name)
-    cleaned = remove(
-        img,
-        session=session,
-        alpha_matting=precise_edges,
-        alpha_matting_foreground_threshold=240,
-        alpha_matting_background_threshold=10,
-        alpha_matting_erode_size=10,
-        post_process_mask=True,
-    )
+    cleaned = remove(img, session=session, post_process_mask=True)
+    cleaned = recover_clipped_edges(cleaned, passes=2 if precise_edges else 0)
     buf = io.BytesIO()
     cleaned.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
@@ -258,12 +262,11 @@ with st.sidebar:
     model_name = AI_MODELS[model_label]
 
     precise_edges = st.checkbox(
-        "🎯 Precise edges (recommended)",
+        "🎯 Recover clipped edges (recommended)",
         value=True,
-        help="Smooths the cut so fine details like hair, fur, or soft "
-             "edges aren't clipped into the subject. Adds a few seconds "
-             "to processing. Turn off only if you need the fastest result "
-             "on a simple, solid-edge image.",
+        help="If the AI cuts a bit into hair, fur, or fine details, this "
+             "gently expands the kept area to reclaim it. Turn off only "
+             "if you need a tighter, exact cutout on a simple image.",
     )
 
     bg_label = st.selectbox("Output background", list(BG_PRESETS.keys()), index=0)
